@@ -45,7 +45,8 @@ class SerpentOnePunchGameAgent(GameAgent):
 
         self.game_inputs = {
             "PUNCH LEFT": [KeyboardKey.KEY_LEFT],
-            "PUNCH RIGHT": [KeyboardKey.KEY_RIGHT]
+            "PUNCH RIGHT": [KeyboardKey.KEY_RIGHT],
+            "WAIT": []
         }
 
         self.frame_buffer = None
@@ -56,7 +57,7 @@ class SerpentOnePunchGameAgent(GameAgent):
         self.observation_count = 0
         self.episode_observation_count = 0
 
-        self.performed_inputs = collections.deque(list(), maxlen=8)
+        self.input_history = collections.deque(list(), maxlen=8)
 
         self.reward_10 = collections.deque(list(), maxlen=10)
         self.reward_100 = collections.deque(list(), maxlen=100)
@@ -70,9 +71,8 @@ class SerpentOnePunchGameAgent(GameAgent):
 
         self.top_reward = 0
         self.top_reward_run = 0
-
-        self.death_check = False
         
+
         self.ppo_agent = SerpentPPO(
             frame_shape=(100, 100, 4),
             game_inputs=self.game_inputs
@@ -99,7 +99,8 @@ class SerpentOnePunchGameAgent(GameAgent):
     def handle_play(self, game_frame):
 
         if self.first_run:
-
+            
+            self.first_run = False
             self.run_count += 1
 
             self.launch()
@@ -107,14 +108,24 @@ class SerpentOnePunchGameAgent(GameAgent):
             self.survival_select()
             self.skill_select()
 
-            self.first_run = False
-
             self.episode_started_at = time.time()
-
             return None
         
+        if self.is_paused(game_frame):
+            return None
+        
+        self.printer.add("One Finger Death Punch - PPO agent")
+        self.printer.add(f"Started - {self.started_at}")
+        self.printer.add(f"Run count - {self.run_count}")
+        self.printer.add("")
         reward = self.calculate_reward(game_frame)
 
+        self.printer.add(f"Total run reward - {self.run_reward}")
+        self.printer.add(f"Current run reward - {reward}")
+        self.printer.add("")
+        self.printer.add(f"Time for this step : {time.time() - self.prev_time}")
+        self.prev_time = time.time()
+        self.printer.add("")
         if self.frame_buffer is not None:
             self.run_reward += reward
 
@@ -123,8 +134,11 @@ class SerpentOnePunchGameAgent(GameAgent):
 
             self.analytics_client.track(event_key="RUN_REWARD", data=dict(reward=reward))
 
+            # Train agent every batch. Larger batches calculate a more accurate gradient but take longer and requires more memory
             if self.ppo_agent.agent.batch_count == self.ppo_agent.agent.batch_size - 1:
-
+                
+                self.printer.add("The batch has been completed and the agent is being updated")
+                self.printer.flush()
                 self.input_controller.tap_key(KeyboardKey.KEY_ESCAPE)
                 self.ppo_agent.observe(reward, terminal=(self.is_game_over(game_frame)))
                 self.input_controller.tap_key(KeyboardKey.KEY_ESCAPE)
@@ -136,20 +150,61 @@ class SerpentOnePunchGameAgent(GameAgent):
                     return None
             else:
                 self.ppo_agent.observe(reward, terminal=(self.is_game_over(game_frame)))
-
-        else:
-            self.ppo_agent.observe(reward, terminal=(self.is_game_over(game_frame)))
+        
+        self.printer.add(f"Observation count: {self.observation_count}")
+        self.printer.add(f"Episode observation count: {self.episode_observation_count}")
+        self.printer.add(f"Current batch count: {self.ppo_agent.agent.batch_count}")
+        self.printer.add("")
 
         if not self.is_game_over(game_frame):
             
+            self.printer.add(f"Average Rewards (Last 10 Runs): {round(self.average_reward_10, 2)}")
+            self.printer.add(f"Average Rewards (Last 100 Runs): {round(self.average_reward_100, 2)}")
+            self.printer.add(f"Average Rewards (Last 1000 Runs): {round(self.average_reward_1000, 2)}")
+            self.printer.add("")
+            self.printer.add(f"Top Run Reward: {round(self.top_reward, 2)} (Run #{self.top_reward_run})")
+            self.printer.add("")
+
+            for inp in self.input_history:
+                self.printer.add(inp)
+            self.printer.flush()
+
             self.frame_buffer = FrameGrabber.get_frames([0, 1, 2, 3], frame_type="PIPELINE")
 
             action, label, action_input = self.ppo_agent.generate_action(self.frame_buffer)
 
+            self.input_history.appendleft(label)
             self.input_controller.handle_keys(action_input)
 
         else:
+            self.printer.flush()
+            self.analytics_client.track(event_key="RUN_END", data=dict(run=self.run_count))
+            self.run_count += 1
 
+            self.reward_10.appendleft(self.run_reward)
+            self.reward_100.appendleft(self.run_reward)
+            self.reward_1000.appendleft(self.run_reward)
+
+            self.rewards.append(self.run_reward)
+
+            self.average_reward_10 = float(np.mean(self.reward_10))
+            self.average_reward_100 = float(np.mean(self.reward_100))
+            self.average_reward_1000 = float(np.mean(self.reward_1000))
+
+            if self.run_reward > self.top_reward:
+                self.top_reward = self.run_reward
+                self.top_reward_run = self.run_count - 1
+
+                self.analytics_client.track(event_key="NEW_RECORD", data=dict(type="REWARD", value=self.run_reward, run=self.run_count - 1))
+
+            self.analytics_client.track(event_key="EPISODE_REWARD", data=dict(reward=self.run_reward))
+
+            if not self.run_count % 10:
+                    self.ppo_agent.agent.save_model(directory=os.path.join(os.getcwd(), "datasets", "OnePunchAi", "ppo_model"), append_timestep=False)
+                    self.dump_metadata()
+
+            self.run_reward = 0
+            self.input_history.clear()
             self.frame_buffer = None
 
             time.sleep(10)
@@ -168,19 +223,65 @@ class SerpentOnePunchGameAgent(GameAgent):
             return 0
 
         else:
-            
             return .001
+    
+    def is_paused(self, game_frame):
+        
+        death_check_region = serpent.cv.extract_region_from_image(game_frame.frame, self.game.screen_regions["DEATH_CHECK"])
+        pause_color_difference = skimage.color.deltaE_cie76(death_check_region[0][0], [5, 20, 25])
+
+        if pause_color_difference < 20:
+            self.printer.flush()
+            self.printer.add("paused")
+            self.printer.flush()
+            return False
 
     def is_game_over(self, game_frame):
-
+        
         death_check_region = serpent.cv.extract_region_from_image(game_frame.frame, self.game.screen_regions["DEATH_CHECK"])
 
-        color_difference = skimage.color.deltaE_cie76(death_check_region[0][0], [49, 199, 247])
-
-        if color_difference < 50:
+        dead_color_difference = skimage.color.deltaE_cie76(death_check_region[0][0], [49, 199, 247])
+        
+        if dead_color_difference < 50:
             return False
         else:
             return True
+
+    def dump_metadata(self):
+        metadata = dict(
+            started_at=self.started_at,
+            run_count=self.run_count - 1,
+            observation_count=self.observation_count,
+            reward_10=self.reward_10,
+            reward_100=self.reward_100,
+            reward_1000=self.reward_1000,
+            rewards=self.rewards,
+            average_reward_10=self.average_reward_10,
+            average_reward_100=self.average_reward_100,
+            average_reward_1000=self.average_reward_1000,
+            top_reward=self.top_reward,
+            top_reward_run=self.top_reward_run
+        )
+
+        with open("datasets/OnePunchAi/metadata.json", "wb") as f:
+            f.write(pickle.dumps(metadata))
+
+    def restore_metadata(self):
+        with open("datasets/OnePunchAi/metadata.json", "rb") as f:
+            metadata = pickle.loads(f.read())
+
+        self.started_at = metadata["started_at"]
+        self.run_count = metadata["run_count"]
+        self.observation_count = metadata["observation_count"]
+        self.reward_10 = metadata["reward_10"]
+        self.reward_100 = metadata["reward_100"]
+        self.reward_1000 = metadata["reward_1000"]
+        self.rewards = metadata["rewards"]
+        self.average_reward_10 = metadata["average_reward_10"]
+        self.average_reward_100 = metadata["average_reward_100"]
+        self.average_reward_1000 = metadata["average_reward_1000"]
+        self.top_reward = metadata["top_reward"]
+        self.top_reward_run = metadata["top_reward_run"]
 
     def initialize_context_classifier(self):
         plugin_path = offshoot.config["file_paths"]["plugins"]
@@ -324,7 +425,7 @@ class SerpentOnePunchGameAgent(GameAgent):
 
     def skill_select(self):
         self.input_controller.click_screen_region(screen_region = "SKILLS_NEXT")
-        time.sleep(5)
+        time.sleep(1)
 
     def score(self):
         time.sleep(5)
@@ -335,15 +436,3 @@ class SerpentOnePunchGameAgent(GameAgent):
         time.sleep(5)
         self.input_controller.click_screen_region(screen_region = "HIGHSCORE_NEXT")
         time.sleep(2)
-        
-    
-    
-    
-    
-
-    
-
-    
-    
-    
-        
