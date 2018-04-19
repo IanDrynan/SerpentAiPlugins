@@ -84,12 +84,6 @@ class SerpentOnePunchGameAgent(GameAgent):
         except Exception:
             pass
 
-        self.analytics_client.track(event_key="INITIALIZE", data=dict(episode_rewards=[]))
-
-        for reward in self.rewards:
-            self.analytics_client.track(event_key="EPISODE_REWARD", data=dict(reward=reward))
-            time.sleep(0.01)
-
         game_frame_buffer = FrameGrabber.get_frames([0, 1, 2, 3], frame_type="PIPELINE")
         self.ppo_agent.generate_action(game_frame_buffer)
 
@@ -131,8 +125,6 @@ class SerpentOnePunchGameAgent(GameAgent):
 
             self.observation_count += 1
             self.episode_observation_count += 1
-
-            self.analytics_client.track(event_key="RUN_REWARD", data=dict(reward=reward))
 
             # Train agent every batch. Larger batches calculate a more accurate gradient but take longer and requires more memory
             if self.ppo_agent.agent.batch_count == self.ppo_agent.agent.batch_size - 1:
@@ -178,7 +170,6 @@ class SerpentOnePunchGameAgent(GameAgent):
 
         else:
             self.printer.flush()
-            self.analytics_client.track(event_key="RUN_END", data=dict(run=self.run_count))
             self.run_count += 1
 
             self.reward_10.appendleft(self.run_reward)
@@ -194,10 +185,6 @@ class SerpentOnePunchGameAgent(GameAgent):
             if self.run_reward > self.top_reward:
                 self.top_reward = self.run_reward
                 self.top_reward_run = self.run_count - 1
-
-                self.analytics_client.track(event_key="NEW_RECORD", data=dict(type="REWARD", value=self.run_reward, run=self.run_count - 1))
-
-            self.analytics_client.track(event_key="EPISODE_REWARD", data=dict(reward=self.run_reward))
 
             if not self.run_count % 10:
                     self.ppo_agent.agent.save_model(directory=os.path.join(os.getcwd(), "datasets", "OnePunchAi", "ppo_model"), append_timestep=False)
