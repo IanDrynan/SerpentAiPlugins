@@ -45,3 +45,13 @@ $RECYCLE.BIN/
 Network Trash Folder
 Temporary Items
 .apdisk
+<<<<<<< HEAD
+files/helpers/__pycache__/ppo.cpython-36.pyc
+
+#SerpentAi specific files
+.model
+||||||| 0e03f5e... Reorganized folder structure
+files/helpers/__pycache__/ppo.cpython-36.pyc
+=======
+>>>>>>> parent of 0e03f5e... Reorganized folder structure
+*.model
